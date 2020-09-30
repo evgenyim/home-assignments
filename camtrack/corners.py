@@ -56,7 +56,7 @@ def calc_new_corners(image_0, image_1, corners1, corners_ids1, radiuses1, corner
                                           corners1, None, maxLevel=1)
     pb, stb, _ = cv2.calcOpticalFlowPyrLK(_to_np_int8(image_1), _to_np_int8(image_0),
                                           p1, None, maxLevel=1)
-    dists = abs(corners1 - pb).squeeze().max(axis=1) < 1.5
+    dists = abs(corners1 - pb).squeeze().max(axis=1) < 0.5
     mask = dists & (st1 == 1).squeeze()
     corners_ids1 = corners_ids1[mask]
     corners1 = p1[mask]
@@ -99,8 +99,8 @@ def calc_new_corners(image_0, image_1, corners1, corners_ids1, radiuses1, corner
 
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
-    max_corners = 2000
-    max_2_corners = 500
+    max_corners = 5000
+    max_2_corners = 5000
     point_size = 7
     quality = 0.008
     min_dist = 5
