@@ -38,6 +38,104 @@ def _to_np_int8(arr):
     return (255 * arr).astype(np.uint8)
 
 
+class CornerTracker:
+
+    def __init__(self, frame):
+        self.frame = frame
+        self.max_corners = 10000
+        self.quality = 0.008
+        self.min_dist = 4
+        self.corners, self.radiuses = self.find_corners(frame, max_corners=self.max_corners, quality=0.002)
+        self.corner_ids = np.arange(self.corners.shape[0])
+        self.last_id = self.corner_ids.shape[0]
+
+    def process_frame(self, new_frame):
+        self.corners, mask = self.apply_opt_flow(new_frame, self.corners)
+        self.corners = self.corners[mask]
+        self.radiuses = self.radiuses[mask]
+        self.corner_ids = self.corner_ids[mask]
+        filter_ = self.create_filter(new_frame, self.corners, self.min_dist)
+        if self.corners.shape[0] < self.max_corners:
+            new_corners, new_radiuses = self.find_corners(new_frame, filter_,
+                                                          max_corners=self.max_corners - self.corners.shape[0],
+                                                          quality=self.quality)
+            new_ids = np.arange(self.last_id, self.last_id + new_corners.shape[0])
+            self.last_id += new_ids.shape[0]
+            self.corners = np.concatenate([self.corners, new_corners])
+            self.radiuses = np.concatenate([self.radiuses, new_radiuses])
+            self.corner_ids = np.concatenate([self.corner_ids, new_ids])
+
+        mask = self.remove_close_corners(self.corners, self.min_dist)
+        self.corners = self.corners[mask == 1]
+        self.radiuses = self.radiuses[mask == 1]
+        self.corner_ids = self.corner_ids[mask == 1]
+
+        self.frame = new_frame
+
+    def find_corners(self, frame, filter_=None, pyr_level=3, point_size=4, max_corners=10000, quality=0.008,
+                     min_dist=7, block_size=7):
+        corners = np.empty((0, 2)).astype(np.float32)
+        radiuses = np.empty(0)
+        coef = 1
+        frame_ = frame.copy()
+        for i in range(pyr_level):
+            if filter_ is not None:
+                filter_[filter_ != 255] = 0
+            new_corners = cv2.goodFeaturesToTrack(_to_np_int8(frame_), max_corners, quality, min_dist * coef,
+                                                  mask=filter_, blockSize=block_size)
+            if new_corners is None:
+                new_corners = np.empty((0, 2)).astype(np.float32)
+            new_corners *= coef
+            new_corners = new_corners.reshape(new_corners.shape[0], 2)
+            new_radiuses = np.ones(new_corners.shape[0]) * point_size * coef
+            corners = np.concatenate([corners, new_corners])
+            radiuses = np.concatenate([radiuses, new_radiuses])
+            new_filter = self.create_filter(frame_, new_corners / coef, area_size=min_dist)
+            frame_ = cv2.pyrDown(frame_)
+            if filter_ is not None:
+                filter_mask = np.where(new_filter == 0)
+                filter_[filter_mask] = 0
+                filter_ = cv2.pyrDown(filter_)
+            else:
+                filter_ = new_filter
+                filter_ = cv2.pyrDown(filter_)
+            coef *= 2
+            max_corners = max(0, max_corners - new_corners.shape[0])
+            if max_corners == 0:
+                return corners, radiuses
+        return corners, radiuses
+
+    def create_filter(self, image, corners, area_size=7):
+        filter_ = np.full(image.shape, 255).astype(np.uint8)
+        for p in corners:
+            filter_ = cv2.circle(filter_, (p[0], p[1]), area_size, 0, -1)
+        return filter_
+
+    def apply_opt_flow(self, new_frame, corners, max_level=2):
+        p1, st1, _ = cv2.calcOpticalFlowPyrLK(_to_np_int8(self.frame), _to_np_int8(new_frame),
+                                              corners, None, maxLevel=max_level)
+        pb, stb, _ = cv2.calcOpticalFlowPyrLK(_to_np_int8(new_frame), _to_np_int8(self.frame),
+                                              p1, None, maxLevel=max_level)
+        dists = abs(corners - pb).squeeze().max(axis=1) < 0.3
+        mask = dists & (st1 == 1).squeeze()
+        return p1, mask
+
+    def remove_close_corners(self, corners, min_dist):
+        good_corners = np.array([corners[0]])
+        st = np.ones(corners.shape[0])
+        for i in range(corners.shape[0]):
+            p = corners[i]
+            c = np.min(np.sum(([p] - good_corners) ** 2, axis=1))
+            if np.sqrt(c) > min_dist:
+                good_corners = np.concatenate([good_corners, [p]])
+            else:
+                st[i] = 0
+        return st
+
+    def get_corners(self):
+        return self.corners, self.corner_ids, self.radiuses
+
+
 def get_pyr_level(image, level):
     if level == 0:
         return image
@@ -47,113 +145,20 @@ def get_pyr_level(image, level):
     return image_0
 
 
-def calc_new_corners(image_0, image_1, corners1, corners_ids1, radiuses1, corners2, ids_number,
-                     max_corners, quality, min_dist, point_size, pyr_level):
-
-    image_1_2 = get_pyr_level(image_1, pyr_level)
-
-    p1, st1, _ = cv2.calcOpticalFlowPyrLK(_to_np_int8(image_0), _to_np_int8(image_1),
-                                          corners1, None, maxLevel=1)
-    pb, stb, _ = cv2.calcOpticalFlowPyrLK(_to_np_int8(image_1), _to_np_int8(image_0),
-                                          p1, None, maxLevel=1)
-    dists = abs(corners1 - pb).squeeze().max(axis=1) < 0.5
-    mask = dists & (st1 == 1).squeeze()
-    corners_ids1 = corners_ids1[mask]
-    corners1 = p1[mask]
-    radiuses1 = radiuses1[mask]
-
-    if len(corners1) < max_corners:
-        new_possible_points = cv2.goodFeaturesToTrack(image_1_2, max_corners, quality, min_dist)
-        new_possible_points2 = []
-        for p in new_possible_points:
-            p0 = np.array([p[0][0] * (2 ** pyr_level), p[0][1] * (2 ** pyr_level)]).reshape(1, 2)
-            c = np.min(np.sum((p0[np.newaxis, :, :] - corners2) ** 2, axis=2))
-            if c > 25 * (1 + pyr_level):
-                new_possible_points2 += [p0]
-        new_possible_points = np.array(new_possible_points2).astype(np.float32)
-        if new_possible_points is not None:
-            if len(corners1) == 0:
-                corners1 = new_possible_points
-                corners_ids1 = np.arange(ids_number, len(corners1))
-                ids_number += len(corners1)
-                radiuses1 = np.ones(len(corners1)) * point_size
-            else:
-                new_corners = []
-                new_ids = []
-                new_radiuses = []
-                for p in new_possible_points:
-                    if len(new_corners) + len(corners1) >= max_corners:
-                        break
-                    c = np.min(np.sum((p[np.newaxis, :, :] - corners1) ** 2, axis=2))
-                    if c > 25 * (1 + pyr_level):
-                        new_corners += [p]
-                        new_ids += [ids_number]
-                        ids_number += 1
-                        new_radiuses += [point_size]
-                if len(new_corners) > 0:
-                    corners1 = np.concatenate([corners1, new_corners])
-                    corners_ids1 = np.concatenate([corners_ids1, new_ids])
-                    radiuses1 = np.concatenate([radiuses1, new_radiuses])
-    return corners1, corners_ids1, radiuses1, ids_number
-
-
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
-    max_corners = 5000
-    max_2_corners = 5000
-    point_size = 7
-    quality = 0.008
-    min_dist = 5
-    min_2_dist = 10
 
     image_0 = frame_sequence[0]
-    # Creating image from 1 level of pyramid
-    image_0_2 = get_pyr_level(image_0, 1)
 
-    corners1 = cv2.goodFeaturesToTrack(image_0, max_corners, quality, min_dist)
-    corners_ids1 = np.arange(len(corners1))
-    radiuses1 = np.ones(len(corners1)) * point_size
-
-    corners2 = cv2.goodFeaturesToTrack(image_0_2, max_2_corners, quality, min_2_dist)
-    ids_number = len(corners_ids1)
-    new_possible_points2 = []
-    corners_ids2 = []
-    radiuses2 = []
-    # For found corners on pyramid level 1 restoring coordinates on image
-    for p in corners2:
-        p0 = np.array([p[0][0] * 2, p[0][1] * 2]).reshape(1, 2)
-        c = np.min(np.sum((p0[np.newaxis, :, :] - corners1) ** 2, axis=2))
-        if c > 10:
-            new_possible_points2 += [p0]
-            corners_ids2 += [ids_number]
-            ids_number += 1
-            radiuses2 += [point_size * 2]
-    corners2 = np.array(new_possible_points2).astype(np.float32)
-    corners_ids2 = np.array(corners_ids2)
-    radiuses2 = np.array(radiuses2)
-
-    corners = np.concatenate((corners1, corners2))
-    corners_ids = np.concatenate((corners_ids1, corners_ids2))
-    radiuses = np.concatenate((radiuses1, radiuses2))
-
+    corner_tracker = CornerTracker(image_0)
+    corners, corners_ids, radiuses = corner_tracker.get_corners()
     builder.set_corners_at_frame(0, FrameCorners(corners_ids, corners, radiuses))
 
     for frame, image_1 in enumerate(frame_sequence[1:], 1):
 
-        corners1, corners_ids1, radiuses1, ids_number = calc_new_corners(image_0, image_1, corners1, corners_ids1,
-                                                                         radiuses1, corners2, ids_number, max_corners,
-                                                                         quality, min_dist, point_size, 0)
-
-        corners2, corners_ids2, radiuses2, ids_number = calc_new_corners(image_0, image_1, corners2, corners_ids2,
-                                                                         radiuses2, corners1, ids_number, max_2_corners,
-                                                                         quality, min_2_dist, point_size * 2, 1)
-
-        corners = np.concatenate((corners1, corners2))
-        corners_ids = np.concatenate((corners_ids1, corners_ids2))
-        radiuses = np.concatenate((radiuses1, radiuses2))
-
+        corner_tracker.process_frame(image_1)
+        corners, corners_ids, radiuses = corner_tracker.get_corners()
         builder.set_corners_at_frame(frame, FrameCorners(corners_ids, corners, radiuses))
-        image_0 = image_1
 
 
 def build(frame_sequence: pims.FramesSequence,
