@@ -73,7 +73,7 @@ class CornerTracker:
         self.frame = new_frame
 
     def find_corners(self, frame, filter_=None, pyr_level=3, point_size=4, max_corners=10000, quality=0.008,
-                     min_dist=7, block_size=7):
+                     min_dist=4, block_size=7):
         corners = np.empty((0, 2)).astype(np.float32)
         radiuses = np.empty(0)
         coef = 1
@@ -105,7 +105,7 @@ class CornerTracker:
                 return corners, radiuses
         return corners, radiuses
 
-    def create_filter(self, image, corners, area_size=7):
+    def create_filter(self, image, corners, area_size=4):
         filter_ = np.full(image.shape, 255).astype(np.uint8)
         for p in corners:
             filter_ = cv2.circle(filter_, (p[0], p[1]), area_size, 0, -1)
