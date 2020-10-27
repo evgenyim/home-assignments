@@ -136,15 +136,6 @@ class CornerTracker:
         return self.corners, self.corner_ids, self.radiuses
 
 
-def get_pyr_level(image, level):
-    if level == 0:
-        return image
-    image_0 = cv2.GaussianBlur(image, (3, 3), 0)
-    image_0 = np.delete(image_0, list(range(0, image.shape[0], 2 ** level)), axis=0)
-    image_0 = np.delete(image_0, list(range(0, image.shape[1], 2 ** level)), axis=1)
-    return image_0
-
-
 def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
 
