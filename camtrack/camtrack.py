@@ -25,7 +25,9 @@ from _camtrack import (
     TriangulationParameters,
     rodrigues_and_translation_to_view_mat3x4,
     calc_inlier_indices,
-    project_points
+    project_points,
+    Correspondences,
+    compute_reprojection_errors
 )
 
 
@@ -35,6 +37,7 @@ class CameraTracker:
         self.corner_storage = corner_storage
         self.frame_count = len(corner_storage)
         self.intrinsic_mat = intrinsic_mat
+        self.triangulation_parameters = TriangulationParameters(5, 1, .1)
         corners_1 = self.corner_storage[view_1[0]]
         corners_2 = self.corner_storage[view_2[0]]
 
@@ -44,17 +47,26 @@ class CameraTracker:
         pose_2 = pose_to_view_mat3x4(view_2[1])
 
         p, ids, med = triangulate_correspondences(corrs, pose_1, pose_2,
-                                                  self.intrinsic_mat, TriangulationParameters(5, 1, .1))
+                                                  self.intrinsic_mat, self.triangulation_parameters)
         self.points2d = p
         self.ids = ids
         self.point_cloud_builder = PointCloudBuilder(ids, p)
         self.view_mats = {}
+        self.used_inliers = {}
         self.view_nones = {i for i in range(self.frame_count)}
         self.view_mats[view_1[0]] = pose_1
+        self.used_inliers[view_1[0]] = len(ids)
         self.view_nones.remove(view_1[0])
         self.view_mats[view_2[0]] = pose_2
+        self.used_inliers[view_2[0]] = len(ids)
         self.view_nones.remove(view_2[0])
         self.last_added_idx = view_2[0]
+
+        self.retriangulate_frames = 3
+        self.max_repr_error = 0.1
+        self.last_retriangulated = {}
+        self.used_inliers_point = {}
+        self.step = 0
 
     def track(self):
         while len(self.view_mats) < self.frame_count:
@@ -65,68 +77,123 @@ class CameraTracker:
 
                 corrs = build_correspondences(corners_1, corners_2)
 
-                p, ids, med = triangulate_correspondences(corrs, v_mat, self.view_mats[self.last_added_idx],
-                                                          self.intrinsic_mat, TriangulationParameters(5, 1, .1))
+                p, ids, _ = triangulate_correspondences(corrs, v_mat, self.view_mats[self.last_added_idx],
+                                                        self.intrinsic_mat, self.triangulation_parameters)
                 self.point_cloud_builder.add_points(ids, p)
             print('Points cloud size: {0}'.format(len(self.point_cloud_builder.points)))
-            view_mat, idx = self.solve_pnp_ransac()
-            self.view_mats[idx] = view_mat[:3]
-            self.view_nones.remove(idx)
-            self.last_added_idx = idx
-            self.remove_bad_points()
+            view_mat, best_idx, inliers = self.solve_pnp_ransac()
+            self.view_mats[best_idx] = view_mat[:3]
+            self.used_inliers[best_idx] = inliers
+            self.view_nones.remove(best_idx)
+            self.last_added_idx = best_idx
+            self.retriangulate_points(best_idx)
+            if self.step % 10 == 0:
+                self.update_tracks()
+            self.step += 1
+
+    def update_tracks(self):
+        for i in self.view_mats.keys():
+            v_mat, inliers = self.solve_pnp_ransac_one(i)
+            if self.used_inliers[i] < len(inliers):
+                self.view_mats[i] = v_mat
+                self.used_inliers[i] = len(inliers)
 
     def solve_pnp_ransac(self):
-        best = -1
+        best = None
         best_ans = 0
         nones = list(self.view_nones)
         np.random.shuffle(nones)
         for i in nones:
-            ids_3d = self.point_cloud_builder.ids
-            ids_2d = self.corner_storage[i].ids
-            ids_intersection, _ = snp.intersect(ids_3d.flatten(), ids_2d.flatten(), indices=True)
-            idx3d = [i for i, j in enumerate(ids_3d) if j in ids_intersection]
-            idx2d = [i for i, j in enumerate(ids_2d) if j in ids_intersection]
-            points3d = self.point_cloud_builder.points[idx3d]
-            points2d = self.corner_storage[i].points[idx2d]
-
-            succeeded, r_vec, t_vec, inliers = cv2.solvePnPRansac(
-                objectPoints=points3d,
-                imagePoints=points2d,
-                cameraMatrix=self.intrinsic_mat,
-                distCoeffs=np.array([]),
-                iterationsCount=250,
-                flags=cv2.SOLVEPNP_ITERATIVE
-            )
+            v_mat, inliers = self.solve_pnp_ransac_one(i)
             if len(inliers) > best_ans:
-                best = (i, r_vec, t_vec)
+                best = v_mat, i
                 best_ans = len(inliers)
             break
         print('Used {} inliers'.format(best_ans))
-        r_vec = best[1]
-        t_vec = best[2]
-        view_mat_3x4 = rodrigues_and_translation_to_view_mat3x4(r_vec, t_vec)
 
-        return view_mat_3x4, best[0]
+        return best[0], best[1], best_ans
 
-    def remove_bad_points(self):
-        to_remove = set()
-        for i, v_mat in self.view_mats.items():
-            ids_3d = self.point_cloud_builder.ids
-            ids_2d = self.corner_storage[i].ids
-            ids_intersection, _ = snp.intersect(ids_3d.flatten(), ids_2d.flatten(), indices=True)
-            idx3d = [i for i, j in enumerate(ids_3d) if j in ids_intersection]
-            idx2d = [i for i, j in enumerate(ids_2d) if j in ids_intersection]
-            points3d = self.point_cloud_builder.points[idx3d]
-            points2d = self.corner_storage[i].points[idx2d]
-            projected_points = project_points(points3d, self.intrinsic_mat @ v_mat)
+    def solve_pnp_ransac_one(self, frame_id):
+        ids_3d = self.point_cloud_builder.ids
+        ids_2d = self.corner_storage[frame_id].ids
+        ids_intersection, _ = snp.intersect(ids_3d.flatten(), ids_2d.flatten(), indices=True)
+        idx3d = [i for i, j in enumerate(ids_3d) if j in ids_intersection]
+        idx2d = [i for i, j in enumerate(ids_2d) if j in ids_intersection]
+        points3d = self.point_cloud_builder.points[idx3d]
+        points2d = self.corner_storage[frame_id].points[idx2d]
 
-            mask = abs(projected_points - points2d).squeeze().max(axis=1) < 1
-            bad_idx = np.array(np.where(mask == False))
-            for j in bad_idx[0]:
-                to_remove.add(idx3d[j])
-        self.point_cloud_builder.remove_elements(to_remove)
+        _, r_vec, t_vec, inliers = cv2.solvePnPRansac(
+            objectPoints=points3d,
+            imagePoints=points2d,
+            cameraMatrix=self.intrinsic_mat,
+            distCoeffs=np.array([]),
+            iterationsCount=250,
+            flags=cv2.SOLVEPNP_EPNP
+        )
+        _, r_vec, t_vec = cv2.solvePnP(
+            objectPoints=points3d[inliers],
+            imagePoints=points2d[inliers],
+            cameraMatrix=self.intrinsic_mat,
+            distCoeffs=np.array([]),
+            flags=cv2.SOLVEPNP_ITERATIVE
+        )
+        view_mat = rodrigues_and_translation_to_view_mat3x4(r_vec, t_vec)
+        return view_mat, inliers
 
+    def retriangulate_points(self, frame_id):
+        to_retriangulate = [i for i in self.corner_storage[frame_id].ids
+                            if (i[0] not in self.last_retriangulated) or
+                            (self.step - self.last_retriangulated[i[0]]) > 20]
+        np.random.shuffle(to_retriangulate)
+        to_retriangulate = to_retriangulate[:500]
+        retriangulated_coords = []
+        retriangulated_ids = []
+        for idx in to_retriangulate:
+            new_coords, cnt = self.retriangulate_point(idx)
+            if new_coords is None:
+                continue
+            if idx[0] not in self.used_inliers_point or self.used_inliers_point[idx[0]] < cnt:
+                self.used_inliers_point[idx[0]] = cnt
+                retriangulated_ids += [idx[0]]
+                retriangulated_coords += [new_coords[0]]
+                self.last_retriangulated[idx[0]] = self.step
+        retriangulated_ids = np.array(retriangulated_ids)
+        retriangulated_coords = np.array(retriangulated_coords)
+        self.point_cloud_builder.update_points(retriangulated_ids, retriangulated_coords)
 
+    def retriangulate_point(self, point_id):
+        coords = []
+        frames = []
+        v_mats = []
+        for i, frame in enumerate(self.corner_storage):
+            if point_id in frame.ids and i in self.view_mats.keys():
+                idx = np.where(frame.ids == point_id)[0][0]
+                coords += [frame.points[idx]]
+                frames += [i]
+                v_mats += [self.view_mats[i]]
+        if len(coords) < 3:
+            return None, None
+        if len(coords) > self.retriangulate_frames:
+            idxs = np.random.choice(len(coords), size=self.retriangulate_frames, replace=False)
+            coords = np.array(coords)[idxs]
+            frames = np.array(frames)[idxs]
+            v_mats = np.array(v_mats)[idxs]
+        best_coords = None
+        best_cnt = 0
+        for _ in range(5):
+            i, j = np.random.choice(len(coords), 2, replace=True)
+            corrs = Correspondences(np.array([point_id]), np.array([coords[i]]), np.array([coords[j]]))
+            point3d, _, _ = triangulate_correspondences(corrs, v_mats[i], v_mats[j], self.intrinsic_mat,
+                                                        self.triangulation_parameters)
+            if len(point3d) == 0:
+                continue
+            errors = np.array([compute_reprojection_errors(point3d, np.array([p]), self.intrinsic_mat @ m)
+                               for m, p in zip(v_mats, coords)])
+            cnt = np.sum(errors < self.max_repr_error)
+            if best_coords is None or best_cnt < cnt:
+                best_cnt = cnt
+                best_coords = point3d
+        return best_coords, best_cnt
 
 
 def track_and_calc_colors(camera_parameters: CameraParameters,
