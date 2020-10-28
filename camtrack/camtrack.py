@@ -37,7 +37,7 @@ class CameraTracker:
         self.corner_storage = corner_storage
         self.frame_count = len(corner_storage)
         self.intrinsic_mat = intrinsic_mat
-        self.triangulation_parameters = TriangulationParameters(5, 1, .1)
+        self.triangulation_parameters = TriangulationParameters(7, 0.5, .1)
         corners_1 = self.corner_storage[view_1[0]]
         corners_2 = self.corner_storage[view_2[0]]
 

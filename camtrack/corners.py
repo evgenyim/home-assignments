@@ -116,7 +116,7 @@ class CornerTracker:
                                               corners, None, maxLevel=max_level)
         pb, stb, _ = cv2.calcOpticalFlowPyrLK(_to_np_int8(new_frame), _to_np_int8(self.frame),
                                               p1, None, maxLevel=max_level)
-        dists = abs(corners - pb).squeeze().max(axis=1) < 0.3
+        dists = abs(corners - pb).squeeze().max(axis=1) < 0.7
         mask = dists & (st1 == 1).squeeze()
         return p1, mask
 
