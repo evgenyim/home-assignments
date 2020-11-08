@@ -32,13 +32,14 @@ from _camtrack import (
 
 # --show ../videos/fox_head_short.mov ../data_examples/fox_camera_short.yml track.yml point_cloud.yml --camera-poses ../data_examples/ground_truth_short.yml --frame-1 0 --frame-2 10
 #--show ../dataset/ironman_translation_fast/rgb/* ../dataset/ironman_translation_fast/camera.yml ../dataset/ironman_translation_fast/track.yml ../dataset/ironman_translation_fast/point_cloud.yml --camera-poses ../dataset/ironman_translation_fast/ground_truth.yml --frame-1 0 --frame-2 10
+#--show ../dataset/bike_translation_slow/rgb/* ../dataset/bike_translation_slow/camera.yml ../dataset/bike_translation_slow/track.yml ../dataset/bike_translation_slow/point_cloud.yml --camera-poses ../dataset/bike_translation_slow/ground_truth.yml --frame-1 0 --frame-2 10
 class CameraTracker:
 
     def __init__(self, corner_storage, intrinsic_mat, view_1, view_2):
         self.corner_storage = corner_storage
         self.frame_count = len(corner_storage)
         self.intrinsic_mat = intrinsic_mat
-        self.triangulation_parameters = TriangulationParameters(7, 0.5, .1)
+        self.triangulation_parameters = TriangulationParameters(7, 1, .1)
         corners_1 = self.corner_storage[view_1[0]]
         corners_2 = self.corner_storage[view_2[0]]
 
@@ -60,15 +61,16 @@ class CameraTracker:
         self.used_inliers = {}
         self.view_nones = {i for i in range(self.frame_count)}
         self.view_mats[view_1[0]] = pose_1
-        self.used_inliers[view_1[0]] = len(ids)
+        self.used_inliers[view_1[0]] = 0
         self.view_nones.remove(view_1[0])
         self.view_mats[view_2[0]] = pose_2
-        self.used_inliers[view_2[0]] = len(ids)
+        self.used_inliers[view_2[0]] = 0
         self.view_nones.remove(view_2[0])
         self.last_added_idx = view_2[0]
+        self.last_inliers = []
 
         self.retriangulate_frames = 3
-        self.max_repr_error = 0.1
+        self.max_repr_error = 1.5
         self.used_inliers_point = {}
         self.step = 0
 
@@ -83,12 +85,20 @@ class CameraTracker:
 
                 p, ids, _ = triangulate_correspondences(corrs, v_mat, self.view_mats[self.last_added_idx],
                                                         self.intrinsic_mat, self.triangulation_parameters)
+                new_corners = []
+                new_ids = []
+                for j, pt in zip(ids, p):
+                    if j in self.last_inliers or j not in self.point_frames:
+                        new_ids += [j]
+                        new_corners += [pt]
                 for i_ in ids:
                     if i_ not in self.point_frames:
                         self.point_frames[i_] = [i]
                     if self.last_added_idx not in self.point_frames[i_]:
                         self.point_frames[i_] += [self.last_added_idx]
-                self.point_cloud_builder.add_points(ids, p)
+
+                if len(new_ids) > 0:
+                    self.point_cloud_builder.add_points(np.array(new_ids), np.array(new_corners))
             print('Points cloud size: {0}'.format(len(self.point_cloud_builder.points)))
             view_mat, best_idx, inliers = self.solve_pnp_ransac()
             self.view_mats[best_idx] = view_mat[:3]
@@ -109,18 +119,18 @@ class CameraTracker:
 
     def solve_pnp_ransac(self):
         best = None
-        best_ans = 0
+        best_ans = []
         nones = list(self.view_nones)
-        np.random.shuffle(nones)
         for i in nones:
             v_mat, inliers = self.solve_pnp_ransac_one(i)
-            if len(inliers) > best_ans:
+            if len(inliers) > len(best_ans):
                 best = v_mat, i
-                best_ans = len(inliers)
-                break
-        print('Used {} inliers'.format(best_ans))
+                best_ans = inliers
+        print('Used {} inliers'.format(len(best_ans)))
 
-        return best[0], best[1], best_ans
+        self.last_inliers = best_ans
+
+        return best[0], best[1], len(best_ans)
 
     def solve_pnp_ransac_one(self, frame_id):
         ids_3d = self.point_cloud_builder.ids
@@ -134,12 +144,23 @@ class CameraTracker:
         if len(points3d) < 6:
             return None, []
 
-        _, r_vec, t_vec, inliers = cv2.solvePnPRansac(
+        _, _, _, inliers = cv2.solvePnPRansac(
             objectPoints=points3d,
             imagePoints=points2d,
             cameraMatrix=self.intrinsic_mat,
             distCoeffs=np.array([]),
             iterationsCount=250,
+            flags=cv2.SOLVEPNP_EPNP
+        )
+
+        if len(points3d[inliers]) < 6:
+            return None, []
+
+        _, r_vec, t_vec = cv2.solvePnP(
+            objectPoints=points3d[inliers],
+            imagePoints=points2d[inliers],
+            cameraMatrix=self.intrinsic_mat,
+            distCoeffs=np.array([]),
             flags=cv2.SOLVEPNP_ITERATIVE
         )
         view_mat = rodrigues_and_translation_to_view_mat3x4(r_vec, t_vec)
@@ -148,7 +169,7 @@ class CameraTracker:
     def retriangulate_points(self):
         to_retriangulate = [i for i in self.point_cloud_builder.ids
                             if ((i[0] not in self.last_retriangulated) or
-                                (len(self.point_frames[i[0]]) - self.last_retriangulated[i[0]]) > 10)
+                                (len(self.point_frames[i[0]]) - self.last_retriangulated[i[0]]) > 5)
                             and i[0] in self.point_frames]
         np.random.shuffle(to_retriangulate)
         to_retriangulate = to_retriangulate[:300]
@@ -167,6 +188,7 @@ class CameraTracker:
         retriangulated_coords = np.array(retriangulated_coords)
         if len(retriangulated_coords) == 0:
             return
+        print('Retriangulated {} points'.format(len(retriangulated_ids)))
         self.point_cloud_builder.update_points(retriangulated_ids, retriangulated_coords)
 
     def retriangulate_point(self, point_id):
