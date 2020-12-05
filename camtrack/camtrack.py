@@ -27,7 +27,9 @@ from _camtrack import (
     calc_inlier_indices,
     project_points,
     Correspondences,
-    compute_reprojection_errors
+    compute_reprojection_errors,
+    _remove_correspondences_with_ids,
+    eye3x4
 )
 
 # --show ../videos/fox_head_short.mov ../data_examples/fox_camera_short.yml track.yml point_cloud.yml --camera-poses ../data_examples/ground_truth_short.yml --frame-1 0 --frame-2 10
@@ -39,34 +41,44 @@ class CameraTracker:
         self.corner_storage = corner_storage
         self.frame_count = len(corner_storage)
         self.intrinsic_mat = intrinsic_mat
-        self.triangulation_parameters = TriangulationParameters(7, 1, .1)
-        corners_1 = self.corner_storage[view_1[0]]
-        corners_2 = self.corner_storage[view_2[0]]
+        self.triangulation_parameters = TriangulationParameters(1, 2, .1)
+        self.view_mats = {}
+
+        if view_1 is None or view_2 is None:
+            print('Finding initial poses')
+            pose1_idx, pose1, pose2_idx, pose2 = self.find_best_start_poses()
+            print('Initial poses found in frames {0} and {1}'.format(pose1_idx, pose2_idx))
+        else:
+            pose1 = pose_to_view_mat3x4(view_1[1])
+            pose2 = pose_to_view_mat3x4(view_2[1])
+            pose1_idx = view_1[0]
+            pose2_idx = view_2[0]
+
+        corners_1 = self.corner_storage[pose1_idx]
+        corners_2 = self.corner_storage[pose2_idx]
 
         corrs = build_correspondences(corners_1, corners_2)
 
-        pose_1 = pose_to_view_mat3x4(view_1[1])
-        pose_2 = pose_to_view_mat3x4(view_2[1])
-
-        p, ids, med = triangulate_correspondences(corrs, pose_1, pose_2,
+        p, ids, med = triangulate_correspondences(corrs, pose1, pose2,
                                                   self.intrinsic_mat, self.triangulation_parameters)
+
         self.ids = ids
         self.point_cloud_builder = PointCloudBuilder(ids, p)
         self.point_frames = {}
         self.last_retriangulated = {}
         for i in ids:
-            self.point_frames[i] = [view_1[0], view_2[0]]
+            self.point_frames[i] = [pose1_idx, pose2_idx]
             self.last_retriangulated[i] = 2
-        self.view_mats = {}
+
         self.used_inliers = {}
         self.view_nones = {i for i in range(self.frame_count)}
-        self.view_mats[view_1[0]] = pose_1
-        self.used_inliers[view_1[0]] = 0
-        self.view_nones.remove(view_1[0])
-        self.view_mats[view_2[0]] = pose_2
-        self.used_inliers[view_2[0]] = 0
-        self.view_nones.remove(view_2[0])
-        self.last_added_idx = view_2[0]
+        self.view_mats[pose1_idx] = pose1
+        self.used_inliers[pose1_idx] = 0
+        self.view_nones.remove(pose1_idx)
+        self.view_mats[pose2_idx] = pose2
+        self.used_inliers[pose2_idx] = 0
+        self.view_nones.remove(pose2_idx)
+        self.last_added_idx = pose2_idx
         self.last_inliers = []
 
         self.retriangulate_frames = 3
@@ -227,6 +239,55 @@ class CameraTracker:
             return None, None
         return best_coords, best_cnt
 
+    def find_best_start_poses(self):
+        best_i = 0
+        best_j = 0
+        best_j_pose = None
+        best_pose_points = 0
+        for i in range(self.frame_count):
+            for j in range(i + 5, self.frame_count):
+                pose, pose_points = self.get_pose(i, j)
+                if pose_points > best_pose_points:
+                    best_i = i
+                    best_j = j
+                    best_j_pose = pose
+                    best_pose_points = pose_points
+        return best_i, eye3x4(), best_j, pose_to_view_mat3x4(best_j_pose)
+
+    def get_pose(self, frame_1, frame_2):
+        p1 = self.corner_storage[frame_1]
+        p2 = self.corner_storage[frame_2]
+
+        corresp = build_correspondences(p1, p2)
+
+        E, mask_essential = cv2.findEssentialMat(corresp[1], corresp[2], self.intrinsic_mat, method=cv2.RANSAC,
+                                                 threshold=1.0)
+
+        _, mask_homography = cv2.findHomography(corresp[1], corresp[2], method=cv2.RANSAC)
+
+        essential_inliers = mask_essential.flatten().sum()
+        homography_inliers = mask_homography.flatten().sum()
+
+        if homography_inliers / essential_inliers > 0.5:
+            return None, 0
+
+        corresp = _remove_correspondences_with_ids(corresp, np.argwhere(mask_essential == 0))
+
+        R1, R2, t = cv2.decomposeEssentialMat(E)
+
+        possible_poses = [Pose(R1.T, R1.T @ t), Pose(R1.T, R1.T @ (-t)), Pose(R2.T, R2.T @ t), Pose(R2.T, R2.T @ (-t))]
+
+        best_pose_points = 0
+        best_pose = None
+
+        for pose in possible_poses:
+            p, ids, med = triangulate_correspondences(corresp, eye3x4(), pose_to_view_mat3x4(pose), self.intrinsic_mat, self.triangulation_parameters)
+            if len(p) > best_pose_points:
+                best_pose_points = len(p)
+                best_pose = pose
+
+        return best_pose, best_pose_points
+
 
 def track_and_calc_colors(camera_parameters: CameraParameters,
                           corner_storage: CornerStorage,
@@ -234,8 +295,6 @@ def track_and_calc_colors(camera_parameters: CameraParameters,
                           known_view_1: Optional[Tuple[int, Pose]] = None,
                           known_view_2: Optional[Tuple[int, Pose]] = None) \
         -> Tuple[List[Pose], PointCloud]:
-    if known_view_1 is None or known_view_2 is None:
-        raise NotImplementedError()
 
     rgb_sequence = frameseq.read_rgb_f32(frame_sequence_path)
     intrinsic_mat = to_opencv_camera_mat3x3(
