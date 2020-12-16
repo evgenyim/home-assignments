@@ -1,0 +1,105 @@
+Finding initial poses
+Initial poses found in frames 14 and 19
+Processing 3/23 frame
+Points cloud size: 1248
+Used 1248 inliers
+Processing 4/23 frame
+Points cloud size: 1389
+Used 1389 inliers
+Retriangulated 87 points
+Processing 5/23 frame
+Points cloud size: 1901
+Used 1900 inliers
+Retriangulated 106 points
+Processing 6/23 frame
+Points cloud size: 1923
+Used 1903 inliers
+Retriangulated 76 points
+Processing 7/23 frame
+Points cloud size: 1948
+Used 1893 inliers
+Retriangulated 74 points
+Processing 8/23 frame
+Points cloud size: 2008
+Used 1945 inliers
+Retriangulated 72 points
+Processing 9/23 frame
+Points cloud size: 2024
+Used 1964 inliers
+Retriangulated 72 points
+Processing 10/23 frame
+Points cloud size: 2067
+Used 947 inliers
+Retriangulated 127 points
+Processing 11/23 frame
+Points cloud size: 2130
+Used 345 inliers
+Retriangulated 122 points
+Processing 12/23 frame
+Points cloud size: 2175
+Used 257 inliers
+Retriangulated 123 points
+Processing 13/23 frame
+Points cloud size: 2194
+Used 112 inliers
+Retriangulated 110 points
+Retriangulated 131 points
+   Iteration     Total nfev        Cost      Cost reduction    Step norm     Optimality   
+       0              1         1.7845e+04                                    1.79e+05    
+       1              2         5.9342e+03      1.19e+04       1.10e+01       4.26e+04    
+       2              3         5.5279e+03      4.06e+02       3.60e+00       2.67e+03    
+       3              4         5.5231e+03      4.79e+00       4.34e-01       3.98e+01    
+       4              5         5.5229e+03      1.27e-01       7.03e-02       8.35e+00    
+`ftol` termination condition is satisfied.
+Function evaluations 5, initial cost 1.7845e+04, final cost 5.5229e+03, first-order optimality 8.35e+00.
+Processing 14/23 frame
+Points cloud size: 2227
+Used 76 inliers
+Retriangulated 69 points
+Processing 15/23 frame
+Points cloud size: 2236
+Used 75 inliers
+Retriangulated 79 points
+Processing 16/23 frame
+Points cloud size: 2253
+Used 60 inliers
+Retriangulated 78 points
+Processing 17/23 frame
+Points cloud size: 2301
+Used 93 inliers
+Retriangulated 75 points
+Processing 18/23 frame
+Points cloud size: 2404
+Used 171 inliers
+Retriangulated 69 points
+Processing 19/23 frame
+Points cloud size: 2479
+Used 201 inliers
+Retriangulated 70 points
+Processing 20/23 frame
+Points cloud size: 2537
+Used 216 inliers
+Retriangulated 59 points
+Processing 21/23 frame
+Points cloud size: 2560
+Used 208 inliers
+Retriangulated 63 points
+Processing 22/23 frame
+Points cloud size: 2577
+Used 209 inliers
+Retriangulated 52 points
+Processing 23/23 frame
+Points cloud size: 2582
+Used 192 inliers
+Retriangulated 47 points
+Retriangulated 7 points
+   Iteration     Total nfev        Cost      Cost reduction    Step norm     Optimality   
+       0              1         2.6614e+04                                    2.47e+05    
+       1              2         9.5682e+03      1.70e+04       1.25e+01       6.56e+04    
+       2              3         7.2091e+03      2.36e+03       3.24e+00       6.14e+03    
+       3              4         7.1696e+03      3.95e+01       6.29e-01       1.79e+02    
+       4              5         7.1660e+03      3.63e+00       2.03e-01       3.67e+01    
+       5              6         7.1651e+03      8.31e-01       1.42e-01       4.16e+01    
+       6              7         7.1649e+03      2.07e-01       4.96e-02       9.57e+00    
+`ftol` termination condition is satisfied.
+Function evaluations 7, initial cost 2.6614e+04, final cost 7.1649e+03, first-order optimality 9.57e+00.

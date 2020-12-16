@@ -45,7 +45,7 @@ class CameraTracker:
         self.corner_storage = corner_storage
         self.frame_count = len(corner_storage)
         self.intrinsic_mat = intrinsic_mat
-        self.triangulation_parameters = TriangulationParameters(1, 2, .1)
+        self.triangulation_parameters = TriangulationParameters(1, 3, .1)
         self.view_mats = {}
 
         if view_1 is None or view_2 is None:
@@ -98,23 +98,26 @@ class CameraTracker:
                 corners_2 = self.corner_storage[self.last_added_idx]
 
                 corrs = build_correspondences(corners_1, corners_2)
+                try:
+                    p, ids, _ = triangulate_correspondences(corrs, v_mat, self.view_mats[self.last_added_idx],
+                                                            self.intrinsic_mat, self.triangulation_parameters)
+                    new_corners = []
+                    new_ids = []
+                    for j, pt in zip(ids, p):
+                        if j in self.last_inliers or j not in self.point_frames:
+                            new_ids += [j]
+                            new_corners += [pt]
+                    for i_ in ids:
+                        if i_ not in self.point_frames:
+                            self.point_frames[i_] = [i]
+                        if self.last_added_idx not in self.point_frames[i_]:
+                            self.point_frames[i_] += [self.last_added_idx]
+                    if len(new_ids) > 0:
+                        self.point_cloud_builder.add_points(np.array(new_ids), np.array(new_corners))
+                except:
+                    continue
 
-                p, ids, _ = triangulate_correspondences(corrs, v_mat, self.view_mats[self.last_added_idx],
-                                                        self.intrinsic_mat, self.triangulation_parameters)
-                new_corners = []
-                new_ids = []
-                for j, pt in zip(ids, p):
-                    if j in self.last_inliers or j not in self.point_frames:
-                        new_ids += [j]
-                        new_corners += [pt]
-                for i_ in ids:
-                    if i_ not in self.point_frames:
-                        self.point_frames[i_] = [i]
-                    if self.last_added_idx not in self.point_frames[i_]:
-                        self.point_frames[i_] += [self.last_added_idx]
 
-                if len(new_ids) > 0:
-                    self.point_cloud_builder.add_points(np.array(new_ids), np.array(new_corners))
             print('Points cloud size: {0}'.format(len(self.point_cloud_builder.points)))
             view_mat, best_idx, inliers = self.solve_pnp_ransac()
             self.view_mats[best_idx] = view_mat[:3]
@@ -124,9 +127,9 @@ class CameraTracker:
             self.retriangulate_points()
             if self.step % 10 == 0 and self.step > 0:
                 self.update_tracks()
-                # k = list(self.view_mats.keys())
-                # k = k[self.step - 10:self.step]
-                # self.bundle_adjustment(k)
+                k = list(self.view_mats.keys())
+                k = k[self.step - 10:self.step]
+                self.bundle_adjustment(k)
             self.step += 1
 
     def update_tracks(self):
@@ -141,7 +144,10 @@ class CameraTracker:
         best_ans = []
         nones = list(self.view_nones)
         for i in nones:
-            v_mat, inliers = self.solve_pnp_ransac_one(i)
+            try:
+                v_mat, inliers = self.solve_pnp_ransac_one(i)
+            except:
+                continue
             if len(inliers) > len(best_ans):
                 best = v_mat, i
                 best_ans = inliers
@@ -255,7 +261,7 @@ class CameraTracker:
         best_j_pose = None
         best_pose_points = 0
         for i in range(self.frame_count):
-            for j in range(i + 5, self.frame_count):
+            for j in range(i + 5, self.frame_count, 5):
                 pose, pose_points = self.get_pose(i, j)
                 if pose_points > best_pose_points:
                     best_i = i
@@ -311,50 +317,78 @@ class CameraTracker:
             _r_vec, _ = cv2.Rodrigues(r_mat)
             return _r_vec, _t_vec
 
-        def bundle_adjustment_sparsity(n_cameras, n_points, camera_indices):
+        def bundle_adjustment_sparsity(n_cameras, n_points):
             m = camera_indices.size * 2
             n = n_cameras * 6 + n_points * 3
             A_ = lil_matrix((m, n), dtype=int)
+            i = np.arange(len(camera_indices))
+            for s in range(6):
+                A_[2 * i, camera_indices * 6 + s] = 1
+                A_[2 * i + 1, camera_indices * 6 + s] = 1
 
-            i = np.arange(camera_indices.size)
-            for j in np.arange(n_cameras):
-                for s in range(6):
-                    A_[2 * i, j * 6 + s] = 1
-                    A_[2 * i + 1, j * 6 + s] = 1
-
-            for j in np.arange(n_points):
-                for s in range(3):
-                    A_[2 * i, n_cameras * 6 + j * 3 + s] = 1
-                    A_[2 * i + 1, n_cameras * 6 + j * 3 + s] = 1
+            for s in range(3):
+                A_[2 * i, n_cameras * 6 + points_indices * 3 + s] = 1
+                A_[2 * i + 1, n_cameras * 6 + points_indices * 3 + s] = 1
             return A_
 
+        def rotate(points_, rot_vecs):
+            theta = np.linalg.norm(rot_vecs, axis=1)[:, np.newaxis]
+            with np.errstate(invalid='ignore'):
+                v = rot_vecs / theta
+                v = np.nan_to_num(v)
+            dot = np.sum(points_ * v, axis=1)[:, np.newaxis]
+            cos_theta = np.cos(theta)
+            sin_theta = np.sin(theta)
+            return cos_theta * points_ + sin_theta * np.cross(v, points_) + dot * (1 - cos_theta) * v
+
+        def project(points_, camera_params):
+            points_proj = rotate(points_, camera_params[:, :3])
+            points_proj += camera_params[:, 3:6]
+            points_proj = np.dot(self.intrinsic_mat, points_proj.T)
+            points_proj /= points_proj[[2]]
+            return points_proj[:2].T
+
+        def fun(params_, n_cameras, n_points):
+            camera_params = params_[:n_cameras * 6].reshape((n_cameras, 6))
+            points_3d = params_[n_cameras * 6:].reshape((n_points, 3))
+            points_proj = project(points_3d[points_indices], camera_params[camera_indices])
+            return (points_proj - corners_points).ravel()
+
         def residuals(params_):
-            points_ = []
-            for i in range(len(intersected)):
-                p_ = params_[6 * (len(frames) - 1) + i * 3:6 * (len(frames) - 1) + i * 3 + 3]
-                points_ += [p_]
-            projected_ = np.empty((0, 2), float)
-            for i in range(len(frames)):
-                r_vec_ = np.array([params_[i * 6], params_[i * 6 + 1], params_[i * 6 + 2]])
-                t_vec_ = np.array([[params_[i * 6 + 3]], [params_[i * 6 + 4]], [params_[i * 6 + 5]]])
-                v_mat = rodrigues_and_translation_to_view_mat3x4(r_vec_, t_vec_)
-                p_mat = self.intrinsic_mat @ v_mat
-                proj = project_points(np.array(points_), p_mat)
-                projected_ = np.concatenate((projected_, proj))
-            ret = (corners_points - projected_).ravel()
-            return ret
+            return fun(params_, len(frames), len(intersected))
 
         def apply_res(res_):
             for i in range(len(intersected)):
-                p_ = res_[6 * (len(frames) - 1) + i * 3:6 * (len(frames) - 1) + i * 3 + 3]
+                p_ = res_[6 * len(frames) + i * 3:6 * len(frames) + i * 3 + 3]
                 _idx = np.argwhere(self.point_cloud_builder.ids == intersected[i])[0][0]
                 _p = self.point_cloud_builder.points[_idx]
-                self.point_cloud_builder.points[_idx] = _p
+                check_point(_p, p_, intersected[i])
             for i in range(len(frames)):
                 r_vec_ = np.array([res_[i * 6], res_[i * 6 + 1], res_[i * 6 + 2]])
                 t_vec_ = np.array([[res_[i * 6 + 3]], [res_[i * 6 + 4]], [res_[i * 6 + 5]]])
                 v_mat = rodrigues_and_translation_to_view_mat3x4(r_vec_, t_vec_)
                 self.view_mats[frames[i]] = v_mat
+
+        def check_point(p_before, p_after, idx):
+            projected_before = []
+            projected_after = []
+            point2d = []
+            for frame in frames:
+                projected_before += [project_points(np.array([p_before]), self.intrinsic_mat @ self.view_mats[frame])]
+                projected_after += [project_points(np.array([p_after]), self.intrinsic_mat @ self.view_mats[frame])]
+                idx_ = np.argwhere(self.corner_storage[frame].ids == idx)[0][0]
+                p = self.corner_storage[frame].points[idx_]
+                point2d += [p]
+            projected_before = np.array(projected_before)
+            projected_after = np.array(projected_after)
+            point2d = np.array(point2d)
+            err_before = np.linalg.norm(point2d - projected_before)
+            err_before_amount = np.sum(err_before < 1.0)
+            err_after = np.linalg.norm(point2d - projected_after)
+            err_after_amount = np.sum(err_after < 1.0)
+            if err_before_amount < err_after_amount:
+                self.point_cloud_builder.points[idx] = p_after
+
 
         intersected = self.point_cloud_builder.ids.flatten()
         corners_idxs = {}
@@ -364,6 +398,8 @@ class CameraTracker:
             intersected, _ = snp.intersect(
                 intersected, crnrs,
                 indices=True)
+
+        intersected = np.array(list(sorted(np.random.choice(intersected, min(500, len(intersected)), replace=False))))
         for frame in frames:
             corner_idx, _ = snp.intersect(
                 intersected,
@@ -388,12 +424,17 @@ class CameraTracker:
             camera_parameters += [r_vec[0], r_vec[1], r_vec[2], t_vec[0], t_vec[1], t_vec[2]]
         params = camera_parameters + points
 
+        camera_indices = []
+        for i in range(len(frames)):
+            camera_indices += [i] * len(intersected)
+        camera_indices = np.array(camera_indices)
+        points_indices = np.tile(np.arange(len(intersected)), len(frames))
+
         self.retriangulate_points_arr([np.array([item]) for item in intersected])
 
-        A = bundle_adjustment_sparsity(len(frames), len(intersected),
-                                       np.arange(len(points) * len(frames)))
-        res = least_squares(residuals, params, jac_sparsity=A, verbose=2, x_scale='jac', ftol=1e-4, method='trf')
-        apply_res(res)
+        A = bundle_adjustment_sparsity(len(frames), len(intersected))
+        res = least_squares(residuals, params, jac_sparsity=A, verbose=2, x_scale='jac', ftol=1e-4, xtol=1e-4, method='trf')
+        apply_res(res.x)
 
 
 def track_and_calc_colors(camera_parameters: CameraParameters,
