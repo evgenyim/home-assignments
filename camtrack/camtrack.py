@@ -124,12 +124,13 @@ class CameraTracker:
             self.used_inliers[best_idx] = inliers
             self.view_nones.remove(best_idx)
             self.last_added_idx = best_idx
-            self.retriangulate_points()
-            if self.step % 10 == 0 and self.step > 0:
+            if self.step % (self.frame_count // 20) == 0 and self.step > 0:
+                self.retriangulate_points()
+            if self.step % (self.frame_count // 10) == 0 and self.step > 0:
                 self.update_tracks()
-                k = list(self.view_mats.keys())
-                k = k[self.step - 10:self.step]
-                self.bundle_adjustment(k)
+                # k = list(self.view_mats.keys())
+                # k = k[self.step - 10:self.step]
+                # self.bundle_adjustment(k)
             self.step += 1
 
     def update_tracks(self):
@@ -238,7 +239,7 @@ class CameraTracker:
             v_mats = np.array(v_mats)[idxs]
         best_coords = None
         best_cnt = 0
-        for _ in range(7):
+        for _ in range(4):
             i, j = np.random.choice(len(coords), 2, replace=True)
             corrs = Correspondences(np.array([point_id]), np.array([coords[i]]), np.array([coords[j]]))
             point3d, _, _ = triangulate_correspondences(corrs, v_mats[i], v_mats[j], self.intrinsic_mat,
@@ -260,8 +261,9 @@ class CameraTracker:
         best_j = 0
         best_j_pose = None
         best_pose_points = 0
+        step = self.frame_count // 20
         for i in range(self.frame_count):
-            for j in range(i + 5, self.frame_count, 5):
+            for j in range(i + 5, self.frame_count, step):
                 pose, pose_points = self.get_pose(i, j)
                 if pose_points > best_pose_points:
                     best_i = i

@@ -42,9 +42,9 @@ class CornerTracker:
 
     def __init__(self, frame):
         self.frame = frame
-        self.max_corners = 10000
-        self.quality = 0.008
-        self.min_dist = 4
+        self.max_corners = 12000
+        self.quality = 0.007
+        self.min_dist = 3
         self.corners, self.radiuses = self.find_corners(frame, max_corners=self.max_corners, quality=0.002)
         self.corner_ids = np.arange(self.corners.shape[0])
         self.last_id = self.corner_ids.shape[0]
